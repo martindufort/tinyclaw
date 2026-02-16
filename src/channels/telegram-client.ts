@@ -256,8 +256,25 @@ function pairingMessage(code: string): string {
     ].join('\n');
 }
 
-// Initialize Telegram bot (polling mode)
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+// Initialize Telegram bot (polling mode with hardened config)
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
+    polling: {
+        interval: 300,
+        autoStart: true,
+        params: {
+            timeout: 30,
+            allowed_updates: ['message']
+        }
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    request: {
+        agentOptions: {
+            keepAlive: true,
+            keepAliveMsecs: 10000
+        },
+        timeout: 40000
+    } as any
+});
 
 // Bot ready
 bot.getMe().then(async (me: TelegramBot.User) => {
@@ -278,6 +295,7 @@ bot.getMe().then(async (me: TelegramBot.User) => {
 
 // Message received - Write to queue
 bot.on('message', async (msg: TelegramBot.Message) => {
+    lastPollSignal = Date.now();
     try {
         // Skip group/channel messages - only handle private chats
         if (msg.chat.type !== 'private') {
@@ -564,10 +582,74 @@ setInterval(() => {
     }
 }, 4000);
 
-// Handle polling errors
-bot.on('polling_error', (error: Error) => {
+// Handle polling errors with auto-recovery
+let isRestarting = false;
+let lastPollSignal = Date.now();
+
+bot.on('polling_error', async (error: Error) => {
+    lastPollSignal = Date.now();
+    const isFatal = error.message.includes('EFATAL') || error.message.includes('ECONNRESET') || error.message.includes('ECONNREFUSED') || error.message.includes('ETIMEDOUT');
     log('ERROR', `Polling error: ${error.message}`);
+
+    if (isFatal && !isRestarting) {
+        isRestarting = true;
+        log('WARN', 'Fatal polling error detected. Restarting polling in 5s...');
+        try {
+            await bot.stopPolling();
+        } catch (_) {
+            // may already be stopped
+        }
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        try {
+            await bot.startPolling();
+            log('INFO', 'Polling restarted successfully');
+        } catch (restartErr) {
+            log('ERROR', `Failed to restart polling: ${(restartErr as Error).message}`);
+            // Retry once more after a longer delay
+            await new Promise(resolve => setTimeout(resolve, 15000));
+            try {
+                await bot.startPolling();
+                log('INFO', 'Polling restarted successfully on second attempt');
+            } catch (restartErr2) {
+                log('ERROR', `Second restart attempt failed: ${(restartErr2 as Error).message}. Exiting.`);
+                process.exit(1);
+            }
+        }
+        isRestarting = false;
+    }
 });
+
+// Polling health watchdog — restart if no poll activity for 2 minutes
+const WATCHDOG_INTERVAL = 30000;
+const WATCHDOG_STALE_THRESHOLD = 120000;
+
+setInterval(async () => {
+    if (isRestarting) return;
+
+    const silenceMs = Date.now() - lastPollSignal;
+    if (silenceMs < WATCHDOG_STALE_THRESHOLD) return;
+
+    isRestarting = true;
+    log('WARN', `Polling watchdog: no activity for ${Math.round(silenceMs / 1000)}s, restarting polling...`);
+
+    try {
+        await bot.stopPolling();
+    } catch (_) {
+        // may already be stopped
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    try {
+        await bot.startPolling();
+        lastPollSignal = Date.now();
+        log('INFO', 'Polling restarted by watchdog');
+    } catch (err) {
+        log('ERROR', `Watchdog restart failed: ${(err as Error).message}`);
+    }
+
+    isRestarting = false;
+}, WATCHDOG_INTERVAL);
 
 // Graceful shutdown
 process.on('SIGINT', () => {

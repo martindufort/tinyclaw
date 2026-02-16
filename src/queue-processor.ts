@@ -475,6 +475,9 @@ async function processMessage(messageFile: string): Promise<void> {
 // Per-agent processing chains - ensures messages to same agent are sequential
 const agentProcessingChains = new Map<string, Promise<void>>();
 
+// Separate chains for heartbeat messages so they don't block user messages
+const heartbeatProcessingChains = new Map<string, Promise<void>>();
+
 /**
  * Peek at a message file to determine which agent it's routed to.
  * Also resolves team IDs to their leader agent.
@@ -499,6 +502,18 @@ function peekAgentId(filePath: string): string {
     }
 }
 
+/**
+ * Peek at a message file to determine if it's a heartbeat message.
+ */
+function peekIsHeartbeat(filePath: string): boolean {
+    try {
+        const messageData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        return messageData.channel === 'heartbeat';
+    } catch {
+        return false;
+    }
+}
+
 // Main processing loop
 async function processQueue(): Promise<void> {
     try {
@@ -516,16 +531,21 @@ async function processQueue(): Promise<void> {
             log('DEBUG', `Found ${files.length} message(s) in queue`);
 
             // Process messages in parallel by agent (sequential within each agent)
+            // Heartbeat messages use separate chains so they never block user messages
             for (const file of files) {
                 // Skip files already queued in a promise chain
                 if (queuedFiles.has(file.name)) continue;
                 queuedFiles.add(file.name);
 
-                // Determine target agent
+                // Determine target agent and whether this is a heartbeat
                 const agentId = peekAgentId(file.path);
+                const isHeartbeat = peekIsHeartbeat(file.path);
+
+                // Use separate chains for heartbeats vs user messages
+                const chains = isHeartbeat ? heartbeatProcessingChains : agentProcessingChains;
 
                 // Get or create promise chain for this agent
-                const currentChain = agentProcessingChains.get(agentId) || Promise.resolve();
+                const currentChain = chains.get(agentId) || Promise.resolve();
 
                 // Chain this message to the agent's promise
                 const newChain = currentChain
@@ -538,12 +558,12 @@ async function processQueue(): Promise<void> {
                     });
 
                 // Update the chain
-                agentProcessingChains.set(agentId, newChain);
+                chains.set(agentId, newChain);
 
                 // Clean up completed chains to avoid memory leaks
                 newChain.finally(() => {
-                    if (agentProcessingChains.get(agentId) === newChain) {
-                        agentProcessingChains.delete(agentId);
+                    if (chains.get(agentId) === newChain) {
+                        chains.delete(agentId);
                     }
                 });
             }

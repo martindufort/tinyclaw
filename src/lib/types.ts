@@ -14,6 +14,7 @@ export interface TeamConfig {
 export interface ChainStep {
     agentId: string;
     response: string;
+    costUsd?: number;
 }
 
 export interface Settings {
@@ -82,6 +83,7 @@ export interface ResponseData {
     timestamp: number;
     messageId: string;
     agent?: string; // which agent handled this
+    costUsd?: number;
     files?: string[];
 }
 

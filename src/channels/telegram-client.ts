@@ -66,6 +66,7 @@ interface ResponseData {
     originalMessage: string;
     timestamp: number;
     messageId: string;
+    costUsd?: number;
     files?: string[];
 }
 
@@ -506,7 +507,13 @@ async function checkOutgoingQueue(): Promise<void> {
 
             try {
                 const responseData: ResponseData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-                const { messageId, message: responseText, sender, senderId } = responseData;
+                let { message: responseText } = responseData;
+                const { messageId, sender, senderId, costUsd } = responseData;
+
+                // Append cost footer if available
+                if (typeof costUsd === 'number') {
+                    responseText += `\n\n_Cost: $${costUsd.toFixed(4)}_`;
+                }
 
                 // Find pending message, or fall back to senderId for proactive messages
                 const pending = pendingMessages.get(messageId);

@@ -6,6 +6,8 @@ import { SCRIPT_DIR, resolveClaudeModel, resolveCodexModel } from './config';
 import { log, emitEvent } from './logging';
 import { ensureAgentDirectory, updateAgentTeammates } from './agent-setup';
 
+export interface InvokeResult { text: string; costUsd: number | null; }
+
 export async function runCommand(command: string, args: string[], cwd?: string): Promise<string> {
     return new Promise((resolve, reject) => {
         const child = spawn(command, args, {
@@ -48,7 +50,7 @@ export async function runCommand(command: string, args: string[], cwd?: string):
  * Logs tool_use events as they happen for observability.
  * Returns the final result text.
  */
-async function runClaudeStreaming(args: string[], cwd: string, agentId: string): Promise<string> {
+async function runClaudeStreaming(args: string[], cwd: string, agentId: string): Promise<InvokeResult> {
     return new Promise((resolve, reject) => {
         const child = spawn('claude', args, {
             cwd,
@@ -59,6 +61,7 @@ async function runClaudeStreaming(args: string[], cwd: string, agentId: string):
         let stderr = '';
         let resultText = '';
         let lastAssistantText = '';
+        let costUsd: number | null = null;
         const startTime = Date.now();
         let turnCount = 0;
 
@@ -100,6 +103,7 @@ async function runClaudeStreaming(args: string[], cwd: string, agentId: string):
                     // Capture the final result
                     if (event.type === 'result') {
                         resultText = event.result || '';
+                        costUsd = typeof event.total_cost_usd === 'number' ? event.total_cost_usd : null;
                         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
                         log('INFO', `Agent ${agentId} completed in ${elapsed}s (${turnCount} tool turns, cost: $${event.total_cost_usd?.toFixed(4) || '?'})`);
                         emitEvent('agent_result', {
@@ -126,7 +130,7 @@ async function runClaudeStreaming(args: string[], cwd: string, agentId: string):
 
         child.on('close', (code) => {
             if (code === 0) {
-                resolve(resultText || lastAssistantText);
+                resolve({ text: resultText || lastAssistantText, costUsd });
                 return;
             }
             const errorMessage = stderr.trim() || `Claude exited with code ${code}`;
@@ -254,7 +258,7 @@ export async function invokeAgent(
     shouldReset: boolean,
     agents: Record<string, AgentConfig> = {},
     teams: Record<string, TeamConfig> = {}
-): Promise<string> {
+): Promise<InvokeResult> {
     // Ensure agent directory exists with config files
     const agentDir = path.join(workspacePath, agentId);
     const isNewAgent = !fs.existsSync(agentDir);
@@ -310,7 +314,7 @@ export async function invokeAgent(
             }
         }
 
-        return response || 'Sorry, I could not generate a response from Codex.';
+        return { text: response || 'Sorry, I could not generate a response from Codex.', costUsd: null };
     } else {
         // Default to Claude (Anthropic)
         log('INFO', `Using Claude provider (agent: ${agentId})`);
@@ -329,7 +333,7 @@ export async function invokeAgent(
         if (continueConversation) {
             claudeArgs.push('-c');
         }
-        claudeArgs.push('--output-format', 'stream-json', '-p', message);
+        claudeArgs.push('--verbose', '--output-format', 'stream-json', '-p', message);
 
         return await runClaudeStreaming(claudeArgs, workingDir, agentId);
     }

@@ -24,7 +24,7 @@ import {
 } from './lib/config';
 import { log, emitEvent } from './lib/logging';
 import { parseAgentRouting, findTeamForAgent, getAgentResetFlag, extractTeammateMentions } from './lib/routing';
-import { invokeAgent } from './lib/invoke';
+import { invokeAgent, InvokeResult } from './lib/invoke';
 
 // Ensure directories exist
 [QUEUE_INCOMING, QUEUE_OUTGOING, QUEUE_PROCESSING, FILES_DIR, path.dirname(LOG_FILE)].forEach(dir => {
@@ -131,7 +131,7 @@ function completeConversation(conv: Conversation): void {
         agents: conv.responses.map(s => s.agentId),
     });
 
-    // Aggregate responses
+    // Aggregate responses and costs
     let finalResponse: string;
     if (conv.responses.length === 1) {
         finalResponse = conv.responses[0].response;
@@ -140,6 +140,11 @@ function completeConversation(conv: Conversation): void {
             .map(step => `@${step.agentId}: ${step.response}`)
             .join('\n\n------\n\n');
     }
+
+    const stepsWithCost = conv.responses.filter(s => typeof s.costUsd === 'number');
+    const totalCostUsd = stepsWithCost.length > 0
+        ? stepsWithCost.reduce((sum, s) => sum + s.costUsd!, 0)
+        : undefined;
 
     // Save chat history
     try {
@@ -203,6 +208,7 @@ function completeConversation(conv: Conversation): void {
         originalMessage: conv.originalMessage,
         timestamp: Date.now(),
         messageId: conv.messageId,
+        costUsd: totalCostUsd,
         files: allFiles.length > 0 ? allFiles : undefined,
     };
 
@@ -343,8 +349,11 @@ async function processMessage(messageFile: string): Promise<void> {
         // Invoke agent
         emitEvent('chain_step_start', { agentId, agentName: agent.name, fromAgent: messageData.fromAgent || null });
         let response: string;
+        let costUsd: number | null = null;
         try {
-            response = await invokeAgent(agent, agentId, message, workspacePath, shouldReset, agents, teams);
+            const result: InvokeResult = await invokeAgent(agent, agentId, message, workspacePath, shouldReset, agents, teams);
+            response = result.text;
+            costUsd = result.costUsd;
         } catch (error) {
             const provider = agent.provider || 'anthropic';
             log('ERROR', `${provider === 'openai' ? 'Codex' : 'Claude'} error (agent: ${agentId}): ${(error as Error).message}`);
@@ -376,6 +385,7 @@ async function processMessage(messageFile: string): Promise<void> {
                 timestamp: Date.now(),
                 messageId,
                 agent: agentId,
+                costUsd: costUsd ?? undefined,
                 files: allFiles.length > 0 ? allFiles : undefined,
             };
 
@@ -422,7 +432,7 @@ async function processMessage(messageFile: string): Promise<void> {
         }
 
         // Record this agent's response
-        conv.responses.push({ agentId, response });
+        conv.responses.push({ agentId, response, costUsd: costUsd ?? undefined });
         conv.totalMessages++;
         collectFiles(response, conv.files);
 
